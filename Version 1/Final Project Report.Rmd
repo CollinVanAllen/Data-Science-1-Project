@@ -1,0 +1,177 @@
+---
+title: "Semester 2 Project"
+author: "Collin Van Allen"
+date: '2022-05-12'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(DataExplorer)
+library(gmodels)
+library(caret)
+library(class)
+
+theme_set(theme_bw())
+
+weather <- read_csv("Rainier_Weather.csv")
+climb <- read_csv("climbing_statistics.csv")
+
+# Coerce date into proper format
+climb$Date <- mdy(climb$Date)
+weather$Date <- mdy(weather$Date)
+
+# Group all routes into single date data point and recalculate success percentage
+climb <- climb %>% group_by(Date, Route) %>% 
+  summarise_each(funs(sum)) %>% mutate(`Success Percentage` = (Succeeded/Attempted)*100)
+
+fullmerge <- left_join(weather, climb, by = "Date")
+
+fullmerge <- fullmerge %>% filter(!is.na(Route))
+
+fullmerge <- fullmerge %>% drop_columns(2)
+
+fullmerge <- fullmerge %>% mutate(`Success Percentage` = (Succeeded / Attempted))
+
+fullmerge <- fullmerge %>% filter(`Success Percentage` <= 1)
+
+fullmerge <- fullmerge %>% mutate(Pass = case_when(`Success Percentage` <= 0.50 ~ "Fail",
+                                                    TRUE ~ "Pass"))
+
+fullmerge$Pass <- factor(fullmerge$Pass,levels=c("Pass","Fail"),labels = c("Pass","Fail"))
+
+# Drop Route names from original dataset
+climb2 <- climb[c(1,3:5)] %>% group_by(Date) %>% 
+  summarise_each(funs(sum)) %>% mutate(`Success Percentage` = (Succeeded/Attempted)*100)
+
+# Create categorical data from quantitative values
+# Speed reference: http://gyre.umeoce.maine.edu/data/gomoos/buoy/php/variable_description.php?variable=wind_2_speed
+fullmerge <- fullmerge %>% 
+  mutate(CatWindSpeed = case_when(`Wind Speed Daily AVG` < 20 ~ "Low",
+                                  `Wind Speed Daily AVG` < 40 ~ "Medium",
+                                  TRUE ~ "High"))
+
+# Merge weather and climb dataframes
+merged <- left_join(x = weather, y = climb2, by = "Date")
+
+# Drop values over 100%
+fullmerge <- as.data.frame(fullmerge)
+```
+
+## Mount Rainier Climbing Data
+
+The goal of this project was to predict the success rate for climbers on Mt. Rainier using data from 2014-2015. This project uses data that contains weather conditions and climbing data such as the route and success percentage. The success percentage was put into factor form as a pass or fail value with the threshold being at least a 50% success rate to be considered a pass. The wind speed was relabeled as a categorical value for the purposes of making some of the graphs, using the following link as a reference http://gyre.umeoce.maine.edu/data/gomoos/buoy/php/variable_description.php?variable=wind_2_speed. The data used for this project was found on Kaggle and can be obtained here: https://www.kaggle.com/datasets/codersree/mount-rainier-weather-and-climbing-data. 
+
+## Exploratory Data Analysis
+
+```{r EDA, echo=FALSE, message=FALSE, warning = FALSE}
+# Quantitative Values
+
+summary(fullmerge$`Temperature AVG`)
+fullmerge %>% ggplot(aes(x= `Temperature AVG`)) + geom_histogram() +
+  ggtitle("Temperature Averages") + xlab("Temperature AVG (F)")
+
+summary(fullmerge$`Relative Humidity AVG`)
+fullmerge %>% ggplot(aes(x = `Relative Humidity AVG`)) + geom_histogram() +
+  ggtitle("Humidity Averages") + xlab("Relative Humidity AVG (%)")
+
+summary(fullmerge$`Success Percentage`)
+fullmerge %>% ggplot(aes(x = `Success Percentage`)) + geom_histogram() +
+  ggtitle("Success Rate") + xlab("Success Rate (%)")
+
+# Qualitative
+
+fullmerge %>% ggplot(aes(x = CatWindSpeed)) + geom_bar()
+table(fullmerge$CatWindSpeed)
+
+# Quant-Quant
+
+fullmerge %>% ggplot(aes(x = `Relative Humidity AVG`, y = `Temperature AVG`)) + geom_point() +
+  ggtitle("Humidity vs Temperature") + 
+  xlab("Relative Humidity AVG (%)") + ylab("Temperature AVG (F)")
+
+
+fullmerge %>% ggplot(aes(x = `Success Percentage`, y = `Temperature AVG`)) + geom_point() +
+  ggtitle("Success Rate vs Temperature") +
+  xlab("Success Rate (%)") + ylab("Temperature AVG (F)")
+
+fullmerge %>% ggplot(aes(x = `Success Percentage`, y = `Relative Humidity AVG`)) + geom_point() +
+  ggtitle("Success Rate vs Humidity") +
+  xlab("Success Rate (%)") + ylab("Relative Humidity AVG (%)")
+
+# Quant - Cat
+
+fullmerge %>% ggplot(aes(x = CatWindSpeed, y = `Temperature AVG`)) + geom_boxplot() +
+  ggtitle("Wind Speed AVG vs Temperature AVG") + ylab("Temperature AVG (F)")
+
+fullmerge %>% ggplot(aes(x = CatWindSpeed, y = `Relative Humidity AVG`)) + geom_boxplot() +
+  ggtitle("Wind Speed AVG vs Relative Humidity") + ylab("Relative Humidity AVG (%)")
+```
+
+## Linear Model
+
+For our linear model we decided to predict the amount of success for each attempt on any given route (success percentage). For this model we used the variables of Relative Humidity Average, Wind Speed Average, and Solar Radiation.
+
+```{r model, echo=FALSE, message=FALSE, warning=FALSE}
+mod1 <- lm(`Success Percentage` ~ `Relative Humidity AVG` + `Wind Speed Daily AVG` + `Solare Radiation AVG`, data = fullmerge)
+summary(mod1)
+plot(mod1, which = 1)
+plot(mod1, which = 2)
+plot(mod1, which = 3)
+plot(mod1, which = 5)
+plot(mod1, which = 6)
+```
+
+Based on the models we can see that a linear model is not the best model that we can use for this prediction. Due to the large amount of success rates that are 0% and 100%, it leaves the model inaccurate. To improve the model more we could use bootstrapping to avoid anomalies in the data and lower variability.
+
+## kNN Model
+
+For the advanced prediction method we decided to used the K nearest means model. We used the same variables to predict as the linear regression model. 
+
+```{r kNN, echo=FALSE, message=FALSE, warning=FALSE}
+normalize <- function(x) {
+  return((x-min(x))/(max(x)-min(x)))
+}
+
+fullmerge_n <- as.data.frame(lapply(fullmerge[c(3:4, 6)],normalize))
+
+averages <- matrix(nrow = 50, ncol = 1)
+
+x1 <- 1:481
+
+# kNN
+
+# for(i in 1:50){
+# x1r <- sample(x1,331)
+#   
+# fullmerge.train <- fullmerge_n[x1r,]
+# fullmerge.test <- fullmerge_n[-x1r,]
+# 
+# fullmerge.train.labels <- fullmerge[x1r,11]
+# fullmerge.test.labels <- fullmerge[-x1r,11]
+# 
+# averages[i,1] <- knn(train = fullmerge.train, test = fullmerge.test, cl = fullmerge.train.labels, k = 21)
+# }
+
+x1r <- sample(x1,331)
+
+fullmerge.train <- fullmerge_n[x1r,]
+fullmerge.test <- fullmerge_n[-x1r,]
+
+fullmerge.train.labels <- fullmerge[x1r,11]
+fullmerge.test.labels <- fullmerge[-x1r,11]
+
+fullmerge.pred <- knn(train = fullmerge.train, test = fullmerge.test, cl = fullmerge.train.labels, k = 21)
+
+summary(fullmerge.pred)
+
+CrossTable(x=fullmerge.test.labels, y=fullmerge.pred,  prop.chisq = FALSE)
+```
+
+Using this model we found that we can predict the amount of times a route will be considered passed or failed based on the three variables that were tested by around 68%. 
+
+## Conclusions and Implications
+
+Based on the models we can correctly predict the amount of completions for a given route based on a 50% success rate (attempts/success) based on the humidity average, wind speed, and solar radiation. To further improve out model and avoid over-fitting we would need to replicate more variations in the model using different testing training data. 
+
